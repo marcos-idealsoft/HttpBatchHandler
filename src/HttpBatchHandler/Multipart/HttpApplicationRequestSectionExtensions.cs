@@ -19,7 +19,7 @@ namespace HttpBatchHandler.Multipart
             this MultipartReader reader, PathString pathBase = default, bool isHttps = false, CancellationToken cancellationToken = default)
         {
             var section = await reader.ReadNextSectionAsync(cancellationToken).ConfigureAwait(false);
-            if (section == null)
+            if (section == null || section.ContentType == null)
             {
                 return null; // if null we're done
             }
