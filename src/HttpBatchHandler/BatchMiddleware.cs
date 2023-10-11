@@ -1,6 +1,4 @@
-﻿using System;
-using System.Threading.Tasks;
-using HttpBatchHandler.Events;
+﻿using HttpBatchHandler.Events;
 using HttpBatchHandler.Multipart;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Http;
@@ -9,6 +7,10 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Http.Features.Authentication;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Net.Http.Headers;
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace HttpBatchHandler
 {
@@ -85,62 +87,21 @@ namespace HttpBatchHandler
                 try
                 {
                     HttpApplicationRequestSection section;
+
+                    List<Task<HttpApplicationMultipart>> tasks = new();
+
                     while ((section = await reader
                                .ReadNextHttpApplicationRequestSectionAsync(pathBase, httpContext.Request.IsHttps, cancellationToken)
                                .ConfigureAwait(false)) != null)
                     {
-                        httpContext.RequestAborted.ThrowIfCancellationRequested();
-                        var preparationContext = new BatchRequestPreparationContext
-                        {
-                            RequestFeature = section.RequestFeature,
-                            Features = CreateDefaultFeatures(httpContext.Features),
-                            State = startContext.State
-                        };
-                        await _options.Events.BatchRequestPreparationAsync(preparationContext, cancellationToken)
-                            .ConfigureAwait(false);
-                        using (var state =
-                            new RequestState(section.RequestFeature, _factory, preparationContext.Features))
-                        {
-                            using (httpContext.RequestAborted.Register(state.AbortRequest))
-                            {
-                                var executedContext = new BatchRequestExecutedContext
-                                {
-                                    Request = state.Context.Request,
-                                    State = startContext.State
-                                };
-                                try
-                                {
-                                    var executingContext = new BatchRequestExecutingContext
-                                    {
-                                        Request = state.Context.Request,
-                                        State = startContext.State
-                                    };
-                                    await _options.Events
-                                        .BatchRequestExecutingAsync(executingContext, cancellationToken)
-                                        .ConfigureAwait(false);
-                                    await _next.Invoke(state.Context).ConfigureAwait(false);
-                                    var response = await state.ResponseTaskAsync().ConfigureAwait(false);
-                                    executedContext.Response = state.Context.Response;
-                                    writer.Add(new HttpApplicationMultipart(response));
-                                }
-                                catch (Exception ex)
-                                {
-                                    state.Abort(ex);
-                                    executedContext.Exception = ex;
-                                }
-                                finally
-                                {
-                                    await _options.Events.BatchRequestExecutedAsync(executedContext, cancellationToken)
-                                        .ConfigureAwait(false);
-                                    abort = executedContext.Abort;
-                                }
+                        tasks.Add(ProcessSection(httpContext, section, startContext, cancellationToken));
+                    }
 
-                                if (abort)
-                                {
-                                    break;
-                                }
-                            }
-                        }
+                    await Task.WhenAll(tasks).ConfigureAwait(false);
+
+                    foreach (var task in tasks)
+                    {
+                        writer.Add(await task);
                     }
                 }
                 catch (Exception ex)
@@ -162,10 +123,63 @@ namespace HttpBatchHandler
                     }
 
                     await _options.Events.BatchEndAsync(endContext, cancellationToken).ConfigureAwait(false);
+
                     if (!endContext.IsHandled)
                     {
                         httpContext.Response.Headers.Add(HeaderNames.ContentType, writer.ContentType);
                         await writer.CopyToAsync(httpContext.Response.Body, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+            }
+        }
+
+        private async Task<HttpApplicationMultipart> ProcessSection(HttpContext httpContext, HttpApplicationRequestSection section, BatchStartContext startContext, CancellationToken cancellationToken)
+        {
+            httpContext.RequestAborted.ThrowIfCancellationRequested();
+
+            var preparationContext = new BatchRequestPreparationContext
+            {
+                RequestFeature = section.RequestFeature,
+                Features = CreateDefaultFeatures(httpContext.Features),
+                State = startContext.State
+            };
+            await _options.Events.BatchRequestPreparationAsync(preparationContext, cancellationToken)
+                .ConfigureAwait(false);
+            using (var state =
+                new RequestState(section.RequestFeature, _factory, preparationContext.Features))
+            {
+                using (httpContext.RequestAborted.Register(state.AbortRequest))
+                {
+                    var executedContext = new BatchRequestExecutedContext
+                    {
+                        Request = state.Context.Request,
+                        State = startContext.State
+                    };
+                    try
+                    {
+                        var executingContext = new BatchRequestExecutingContext
+                        {
+                            Request = state.Context.Request,
+                            State = startContext.State
+                        };
+                        await _options.Events
+                            .BatchRequestExecutingAsync(executingContext, cancellationToken)
+                            .ConfigureAwait(false);
+                        await _next.Invoke(state.Context).ConfigureAwait(false);
+                        var response = await state.ResponseTaskAsync().ConfigureAwait(false);
+                        executedContext.Response = state.Context.Response;
+                        return new HttpApplicationMultipart(response);
+                    }
+                    catch (Exception ex)
+                    {
+                        state.Abort(ex);
+                        executedContext.Exception = ex;
+                        throw;
+                    }
+                    finally
+                    {
+                        await _options.Events.BatchRequestExecutedAsync(executedContext, cancellationToken)
+                            .ConfigureAwait(false);
                     }
                 }
             }
