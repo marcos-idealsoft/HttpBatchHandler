@@ -74,7 +74,7 @@ namespace HttpBatchHandler
             await _options.Events.BatchStartAsync(startContext, cancellationToken).ConfigureAwait(false);
             Exception exception = null;
             var abort = false;
-            var reader = new MultipartReader(boundary, httpContext.Request.Body);
+            var reader = new MultipartReader(boundary, httpContext.Request.Body) { BodyLengthLimit = long.MaxValue, HeadersCountLimit = 32, HeadersLengthLimit = 1024 * 32 };
             // PathString.StartsWithSegments that we use requires the base path to not end in a slash.
             var pathBase = httpContext.Request.PathBase;
             if (pathBase.HasValue && pathBase.Value.EndsWith("/"))
@@ -94,14 +94,7 @@ namespace HttpBatchHandler
                                .ReadNextHttpApplicationRequestSectionAsync(pathBase, httpContext.Request.IsHttps, cancellationToken)
                                .ConfigureAwait(false)) != null)
                     {
-                        tasks.Add(ProcessSection(httpContext, section, startContext, cancellationToken));
-                    }
-
-                    await Task.WhenAll(tasks).ConfigureAwait(false);
-
-                    foreach (var task in tasks)
-                    {
-                        writer.Add(await task);
+                        writer.Add(await ProcessSection(httpContext, section, startContext, cancellationToken));
                     }
                 }
                 catch (Exception ex)
